@@ -106,7 +106,7 @@ gcc -O3 -o run run.cpp -lm
 
 `-Ofast` Run additional optimizations which may break compliance with the C/IEEE specifications, in addition to `-O3`. See [the GCC docs](https://gcc.gnu.org/onlinedocs/gcc/Optimize-Options.html) for more information.
 
-`-ffast-math` breaks IEEE compliance, e.g. allowing reordering of operations, disables a bunch of checks for e.g. NaNs (assuming they don't happen), enables reciprocal approximations, disables signed zero, etc.
+`-ffast-math` breaks IEEE compliance, e.g. allowing reordering of operations, disables a bunch of checks for e.g. NaNs (assuming they don't happen), enables reciprocal approximations, disables signed zero, etc. However, there is a good reason to be suspicious of this setting, one good writeup is here: ["Beware of fast-math"](https://simonbyrne.github.io/notes/fastmath/).
 
 `-funsafe-math-optimizations` a more limited form of -ffast-math, that still breaks IEEE compliance but doesn't have all of the numeric/error handling changes from `-ffasth-math`. See [the GCC docs](https://gcc.gnu.org/wiki/FloatingPointMath) for more information.
 
@@ -120,6 +120,20 @@ gcc -Ofast -o run run.cpp -lm
 
 Also, I saw someone report higher throughput replacing `gcc` with `clang`.
 
+**OpenMP** Big improvements can also be achieved by compiling with OpenMP, which "activates" the `#pragma omp parallel for` inside the matmul. You can compile e.g. like so:
+
+```bash
+clang -Ofast -fopenmp -march=native run.c  -lm  -o run
+```
+
+(I believe you can swap clang/gcc, and may try to leave out -march=native). Then when you run inference, make sure to use OpenMP flags to set the number of threads, e.g.:
+
+```bash
+OMP_NUM_THREADS=4 ./run out/model.bin
+```
+
+Depending on your system resources you may want to tweak these hyperparameters. (TODO: I am not intimitely familiar with OpenMP and its configuration, if someone would like to flesh out this section I would welcome a PR).
+
 ## unsorted todos
 
 - why is there a leading space in C++ sampling code when we `./run`?
@@ -129,5 +143,10 @@ Also, I saw someone report higher throughput replacing `gcc` with `clang`.
 - weird errors with torch.compile and wandb when using DDP
 - make more better tests to decrease yolo
 
+## ack
+
+I trained the llama2.c storyteller models on a 4X A100 40GB box graciously provided by the excellent [Lambda labs](https://lambdalabs.com/service/gpu-cloud), thank you.
+
 ## License
+
 MIT
