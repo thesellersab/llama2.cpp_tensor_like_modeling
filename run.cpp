@@ -3,31 +3,29 @@
 #include <cmath>
 #include <random>
 #include <iostream>
+#include <string>
 
-typedef std::vector<double> tensor1d;
+typedef std::vector<float> tensor1d;
 typedef std::vector<tensor1d> tensor2d;
 typedef std::vector<tensor2d> tensor3d;
 
-double EPS = 1e-5;
+float EPS = 1e-5;
 
 
 struct Config {
-    int dim;  // transformer dimension
-    int hidden_dim;  // for feed-forward-network (ffn) layers
-
-    int n_layers;  // number of layers
-    // attention heads
-    int n_heads;  // number of query heads
-    int n_key_value_heads;  // number of key/value heads (can be < query heads because of multiquery)
-
-    int vocab_size;  // vocabulary size, usually 256 (byte-level)
-    int seq_len;  // max sequence length
+    int dim; // transformer dimension
+    int hidden_dim; // for ffn layers
+    int n_layers; // number of layers
+    int n_heads; // number of query heads
+    int n_kv_heads; // number of key/value heads (can be < query heads because of multiquery)
+    int vocab_size; // vocabulary size, usually 256 (byte-level)
+    int seq_len; // max sequence length
 };
 
 struct TransformerWeights {
     tensor2d token_embedding_table;  // [vocab_size, dim]
     // weights for rmsnorms
-    tensor2d rms_attention_weight;  // [layer, dim]
+    tensor2d rms_att_weight;  // [layer, dim]
     tensor2d rms_ffn_weight;  // [layer, dim]
     // weights for attention matmuls
     tensor3d wq;  // [layer, dim, dim]
@@ -41,8 +39,8 @@ struct TransformerWeights {
     // final rmsnorm
     tensor1d rms_final_weight;  // [dim]
     // freq_cis for RoPE relatively positional embeddings
-    tensor2d freq_cis_real;  // [seq_len, dim/2]
-    tensor2d freq_cis_imag;  // [seq_len, dim/2]
+    tensor2d freq_cis_real;  // [seq_len, (dim/n_heads)/2]
+    tensor2d freq_cis_imag;  // [seq_len, (dim/n_heads)/2]
 };
 
 struct RunState {
@@ -97,7 +95,7 @@ void free_state_tensors(RunState &state) {
 
 void resize_weights_tensors(TransformerWeights &weights, Config &config) {
     tensor2d(config.vocab_size, tensor1d(config.dim)).swap(weights.token_embedding_table);
-    tensor2d(config.n_layers, tensor1d(config.dim)).swap(weights.rms_attention_weight);
+    tensor2d(config.n_layers, tensor1d(config.dim)).swap(weights.rms_att_weight);
     tensor2d(config.n_layers, tensor1d(config.dim)).swap(weights.rms_ffn_weight);
     tensor3d(config.n_layers, tensor2d(config.dim, tensor1d(config.dim))).swap(weights.wq);
     tensor3d(config.n_layers, tensor2d(config.dim, tensor1d(config.dim))).swap(weights.wk);
@@ -107,13 +105,14 @@ void resize_weights_tensors(TransformerWeights &weights, Config &config) {
     tensor3d(config.n_layers, tensor2d(config.dim, tensor1d(config.hidden_dim))).swap(weights.w2);
     tensor3d(config.n_layers, tensor2d(config.hidden_dim, tensor1d(config.dim))).swap(weights.w3);
     tensor1d(config.dim).swap(weights.rms_final_weight);
-    tensor2d(config.seq_len, tensor1d(config.dim / 2)).swap(weights.freq_cis_real);
-    tensor2d(config.seq_len, tensor1d(config.dim / 2)).swap(weights.freq_cis_imag);
+    int head_size = config.dim / config.n_heads;
+    tensor2d(config.seq_len, tensor1d(head_size / 2)).swap(weights.freq_cis_real);
+    tensor2d(config.seq_len, tensor1d(head_size / 2)).swap(weights.freq_cis_imag);
 }
 
 void free_weights_tensors(TransformerWeights &weights) {
     weights.token_embedding_table.clear();
-    weights.rms_attention_weight.clear();
+    weights.rms_att_weight.clear();
     weights.rms_ffn_weight.clear();
     weights.wq.clear();
     weights.wk.clear();
@@ -133,7 +132,7 @@ void free_weights_tensors(TransformerWeights &weights) {
 
 // TODO: merge these into one function
 void checkpoint_init_tensor(tensor1d &tensor, std::fstream &file) {
-    file.read(reinterpret_cast<char*>(tensor.data()), tensor.size() * sizeof(float));
+    file.read((char*)(tensor.data()), tensor.size() * sizeof(float));
 }
 void checkpoint_init_tensor(tensor2d &tensor, std::fstream &file) {
     for (auto &t : tensor) checkpoint_init_tensor(t, file);
@@ -144,7 +143,7 @@ void checkpoint_init_tensor(tensor3d &tensor, std::fstream &file) {
 
 void checkpoint_init_weights(TransformerWeights &weights, Config &config, std::fstream &file) {
     checkpoint_init_tensor(weights.token_embedding_table, file);
-    checkpoint_init_tensor(weights.rms_attention_weight, file);
+    checkpoint_init_tensor(weights.rms_att_weight, file);
     checkpoint_init_tensor(weights.wq, file);
     checkpoint_init_tensor(weights.wk, file);
     checkpoint_init_tensor(weights.wv, file);
@@ -177,23 +176,23 @@ void accum(tensor1d &lhs, tensor1d &rhs) {
 }
 
 void rmsnorm(tensor1d &output, tensor1d &input, tensor1d &weight) {
-    double ss = 0;
+    float ss = 0.0;
     for (int i = 0; i < input.size(); i++)
         ss += input[i] * input[i];
-    ss = sqrt(ss / input.size());
-    double inv_ss = 1 / (ss + EPS);
+    ss = ss / input.size() + EPS;
+    float inv_ss = 1 / sqrt(ss);
     for (int i = 0; i < input.size(); i++)
         output[i] = input[i] * inv_ss * weight[i];
 }
 
 void softmax(tensor1d &output, tensor1d &input, int max_pos = -1) {
     if (max_pos == -1)  max_pos = input.size();
-    double max_val = input[0];
+    float max_val = input[0];
     for (int i = 1; i < max_pos; i++)
         if (input[i] > max_val)  max_val = input[i];
     
     // exp and sum
-    double sum = 0;
+    float sum = 0;
     for (int i = 0; i < max_pos; i++) {
         output[i] = exp(input[i] - max_val);
         sum += output[i];
@@ -222,7 +221,7 @@ void transformer(int token_index, int token_position, Config &config, RunState &
 
     for (int layer = 0; layer < config.n_layers; ++layer) {
         // attention rmsnorm
-        rmsnorm(state.xb, state.x, transformer_weights.rms_attention_weight[layer]);
+        rmsnorm(state.xb, state.x, transformer_weights.rms_att_weight[layer]);
 
         // attention
         matmul(state.q, state.xb, transformer_weights.wq[layer]);
@@ -233,10 +232,16 @@ void transformer(int token_index, int token_position, Config &config, RunState &
         for (int head = 0; head < config.n_heads; ++head) {
             int start = head * head_size;
             for (int i = 0; i < head_size; i += 2) {
-                state.q[start + i]     = state.q[start + i] * transformer_weights.freq_cis_real[token_position][i / 2] - state.q[start + i + 1] * transformer_weights.freq_cis_imag[token_position][i / 2];
-                state.q[start + i + 1] = state.q[start + i] * transformer_weights.freq_cis_imag[token_position][i / 2] + state.q[start + i + 1] * transformer_weights.freq_cis_real[token_position][i / 2];
-                state.k[start + i]     = state.k[start + i] * transformer_weights.freq_cis_real[token_position][i / 2] - state.k[start + i + 1] * transformer_weights.freq_cis_imag[token_position][i / 2];
-                state.k[start + i + 1] = state.k[start + i] * transformer_weights.freq_cis_imag[token_position][i / 2] + state.k[start + i + 1] * transformer_weights.freq_cis_real[token_position][i / 2];
+                float q0 = state.q[start + i];
+                float q1 = state.q[start + i + 1];
+                float k0 = state.k[start + i];
+                float k1 = state.k[start + i + 1];
+                float fcr = transformer_weights.freq_cis_real[token_position][i / 2];
+                float fci = transformer_weights.freq_cis_imag[token_position][i / 2];
+                state.q[start + i]     = q0 * fcr - q1 * fci;
+                state.q[start + i + 1] = q0 * fci + q1 * fcr;
+                state.k[start + i]     = k0 * fcr - k1 * fci;
+                state.k[start + i + 1] = k0 * fci + k1 * fcr;
             }
         }
 
@@ -247,7 +252,7 @@ void transformer(int token_index, int token_position, Config &config, RunState &
         // multiquery attention
         for (int head = 0; head < config.n_heads; ++head) {
             for (int timestep = 0; timestep < token_position; ++timestep) {
-                double score = 0;
+                float score = 0;
                 for (int i = 0; i < head_size; ++i)
                     score += state.q[head * head_size + i] * state.key_cache[layer][timestep][head * head_size + i];
                 score /= std::sqrt(head_size * 1.0);
@@ -259,9 +264,9 @@ void transformer(int token_index, int token_position, Config &config, RunState &
 
             // weighted sum
             for (int i = 0; i < head_size; ++i) {
-                state.xb2[head * head_size + i] = 0;
-                for (int timestep = 0; timestep < token_position; ++timestep)
-                    state.xb2[head * head_size + i] += state.attention[timestep] * state.value_cache[layer][timestep][head * head_size + i];
+                state.xb[head * head_size + i] = 0;
+                for (int timestep = 0; timestep <= token_position; ++timestep)
+                    state.xb[head * head_size + i] += state.attention[timestep] * state.value_cache[layer][timestep][head * head_size + i];
             }
         }
 
@@ -272,7 +277,7 @@ void transformer(int token_index, int token_position, Config &config, RunState &
         accum(state.x, state.xb2);
 
         // ffn rmsnorm
-        rmsnorm(state.xb, state.x, transformer_weights.rms_attention_weight[layer]);
+        rmsnorm(state.xb, state.x, transformer_weights.rms_ffn_weight[layer]);
 
         // Now for FFN in PyTorch we have: self.w2(F.silu(self.w1(x))) * self.w3(x)
         // first calculate self.w1(x) and self.w3(x)
@@ -308,9 +313,9 @@ int sample(tensor1d &probabilities) {
     std::random_device rd;
     std::mt19937 gen(rd());
     std::uniform_real_distribution<> dis(0, 1);
-    double r = dis(gen);
+    float r = dis(gen);
 
-    double cdf = 0.0;
+    float cdf = 0.0;
     for (int i = 0; i < probabilities.size(); ++i) {
         cdf += probabilities[i];
         if (r < cdf)
@@ -322,7 +327,7 @@ int sample(tensor1d &probabilities) {
 
 int argmax(tensor1d &values) {
     int max_i = 0;
-    double max_value = values[0];
+    float max_value = values[0];
     for (int i = 1; i < values.size(); ++i)
         if (values[i] > max_value) {
             max_i = i;
@@ -332,10 +337,8 @@ int argmax(tensor1d &values) {
 }
 
 int main(int argc, char *argv[]) {
-    std::cout.tie(NULL);
-
     std::string checkpoint;
-    double temperature = 0.9;
+    float temperature = 0.9;
     // 'checkpoint' is a required arg
     if (argc < 2) {
         std::cout << "Usage: " << argv[0] << " <checkpoint_file> [temperature]\n";
@@ -347,22 +350,47 @@ int main(int argc, char *argv[]) {
         temperature = std::atof(argv[2]);
 
     Config config;
-    std::fstream file(checkpoint);
-    if (!file) {
-        std::cout << "Unable to open file!\n";
-        return 1;
-    }
-    // read file contents to config
-    file.read((char*)&config, sizeof(config));
-
     TransformerWeights transformer_weights;
-    resize_weights_tensors(transformer_weights, config);
-    checkpoint_init_weights(transformer_weights, config, file);
-    file.close();
+    {
+        std::fstream file(checkpoint);
+        if (!file) {
+            std::cout << "Unable to open the checkpoint file " << checkpoint << "\n";
+            return 1;
+        }
+        // read file contents to config
+        file.read((char*)&config, sizeof(config));
+        resize_weights_tensors(transformer_weights, config);
+        checkpoint_init_weights(transformer_weights, config, file);
+        file.close();
+    }
+
+    std::vector<std::string> vocab(config.vocab_size);
+    {
+        std::fstream file("tokenizer.bin");
+        if (!file) {
+            std::cout
+                << "Unable to open the tokenizer file tokenizer.bin! Run \n"
+                << "python tokenizer.py to convert tokenizer.model -> tokenizer.bin\n";
+            return 1;
+        }
+        for (int i = 0; i < config.vocab_size; i++) {
+            int len;
+            vocab[i] = "";
+            file.read((char*)&len, sizeof(int));
+            for (int j = 0; j < len; ++j) {
+                char c;
+                file.read((char*)&c, sizeof(char));
+                vocab[i].push_back(c);
+            }
+            vocab[i].push_back('\0');
+        }
+        file.close();
+    }
 
     RunState state;
     resize_state_tensors(state, config);
 
+    clock_t start = clock();
     int next;
     int token = 1;  // 1 = BOS token in Llama-2 sentence-piece
     for (int pos = 0; pos < config.seq_len; ++pos) {
@@ -377,13 +405,21 @@ int main(int argc, char *argv[]) {
             softmax(state.logits, state.logits);
             next = sample(state.logits);
         }
-        std::cout << next << "\n";
+        std::cout << vocab[next];
 
         token = next;
     }
+    std::cout << "\n";
 
+    // report our achieved tok/s
+    clock_t end = clock();
+    double elapsed = (double)(end - start) / CLOCKS_PER_SEC;
+    printf("achieved tok/s: %f\n", config.seq_len / elapsed);
+
+    // memory cleanup
     free_state_tensors(state);
     free_weights_tensors(transformer_weights);
+    vocab.clear();
 
     return 0;
 }
