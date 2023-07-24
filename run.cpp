@@ -207,7 +207,7 @@ void matmul(tensor1d &output, tensor1d &input, tensor2d &weight) {
     for (int i = 0; i < output.size(); i++) {
         output[i] = 0;
         for (int j = 0; j < input.size(); j++)
-            output[i] += input[j] * weight[j][i];
+            output[i] += input[j] * weight[i][j];
     }
 }
 
