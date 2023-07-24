@@ -371,6 +371,7 @@ int main(int argc, char *argv[]) {
 
         if (temperature < EPS) {
             next = argmax(state.logits);
+        } else {
             for (int q = 0; q < config.vocab_size; ++q)
                 state.logits[q] /= temperature;
             softmax(state.logits, state.logits);
