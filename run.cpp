@@ -337,6 +337,8 @@ int argmax(tensor1d &values) {
 }
 
 int main(int argc, char *argv[]) {
+    std::cout.tie(NULL);
+
     std::string checkpoint;
     float temperature = 0.9;
     // 'checkpoint' is a required arg
