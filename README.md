@@ -1,5 +1,7 @@
 
 ## llama2.cpp
+![image](https://github.com/user-attachments/assets/cecfdf3d-fb91-4449-b1c3-aa5586ae8c1c)
+![image](https://github.com/user-attachments/assets/a7ce8921-87d5-4085-9f8e-c7ad8775faf2)
 
 Have you ever wanted to inference a baby [Llama 2](https://ai.meta.com/llama/) model in pure C++? No? Well, now you can!
 
